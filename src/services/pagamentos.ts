@@ -15,7 +15,7 @@ export async function listarPagamentos(options?: {
   const pagamentos = await pb.collection('pagamentos').getFullList<Pagamento>({
     filter: filters.length > 0 ? filters.join(' && ') : undefined,
     sort: '-created',
-    expand: 'consulta_id,consulta_id.paciente_id',
+    expand: 'consulta_id,consulta_id.paciente_id,paciente_id',
     requestKey: null,
   })
 
@@ -25,6 +25,13 @@ export async function listarPagamentos(options?: {
     const mes = parseInt(mesStr, 10)
 
     return pagamentos.filter((p) => {
+      // Se for pagamento mensal e tiver mes_referencia definido, respeita diretamente
+      if (p.tipo_pagamento === 'Mensal' && p.mes_referencia) {
+        return p.mes_referencia === options.mesAno
+      }
+
+      // Caso contrário (consulta ou sem mes_referencia explicito):
+      // Usa data de pagamento, data da consulta ou criação
       const dataRef = p.data_pagamento || p.expand?.consulta_id?.data || p.created
       if (!dataRef) return false
       const d = new Date(dataRef)

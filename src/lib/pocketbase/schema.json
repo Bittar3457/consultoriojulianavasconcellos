@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-26T03:29:56.405Z",
+  "generatedAt": "2026-10-05T20:33:02.764Z",
   "collections": [
     {
       "name": "users",
@@ -99,6 +99,12 @@
           "required": false,
           "system": false,
           "autodateTriggers": ["onCreate", "onUpdate"]
+        },
+        {
+          "name": "horarios_atendimento",
+          "type": "json",
+          "required": false,
+          "system": false
         }
       ],
       "indexes": ["CREATE INDEX idx_pref_created ON preferencias_usuario (created DESC)"]
@@ -268,7 +274,7 @@
         {
           "name": "consulta_id",
           "type": "relation",
-          "required": true,
+          "required": false,
           "system": false,
           "collectionRef": "consultas"
         },
@@ -311,6 +317,32 @@
           "required": false,
           "system": false,
           "autodateTriggers": ["onCreate", "onUpdate"]
+        },
+        {
+          "name": "paciente_id",
+          "type": "relation",
+          "required": false,
+          "system": false,
+          "collectionRef": "pacientes"
+        },
+        {
+          "name": "tipo_pagamento",
+          "type": "select",
+          "required": false,
+          "system": false,
+          "selectValues": ["Consulta", "Mensal"]
+        },
+        {
+          "name": "mes_referencia",
+          "type": "text",
+          "required": false,
+          "system": false
+        },
+        {
+          "name": "descricao",
+          "type": "text",
+          "required": false,
+          "system": false
         }
       ],
       "indexes": [

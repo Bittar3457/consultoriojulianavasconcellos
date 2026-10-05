@@ -42,25 +42,27 @@ import {
   excluirConsulta,
 } from '@/services/consultas'
 import { formatarDataAbreviada } from '@/lib/formatters'
+import { Link } from 'react-router-dom'
 import { useRealtime } from '@/hooks/use-realtime'
-import type { Consulta, Paciente, ModalidadeConsulta, StatusConsulta } from '@/types'
+import { HORARIOS_PADRAO_CONSULTORIO } from '@/services/preferencias'
+import type {
+  Consulta,
+  Paciente,
+  ModalidadeConsulta,
+  StatusConsulta,
+  DiaSemanaChave,
+  HorariosAtendimentoSemana,
+} from '@/types'
 
-const HORARIOS_DIA = [
-  '08:00',
-  '09:00',
-  '10:00',
-  '11:00',
-  '12:00',
-  '13:00',
-  '14:00',
-  '15:00',
-  '16:00',
-  '17:00',
-  '18:00',
-  '19:00',
+const DIAS_SEMANA_MAP: { chave: DiaSemanaChave; nome: string }[] = [
+  { chave: 'segunda', nome: 'Segunda' },
+  { chave: 'terca', nome: 'Terça' },
+  { chave: 'quarta', nome: 'Quarta' },
+  { chave: 'quinta', nome: 'Quinta' },
+  { chave: 'sexta', nome: 'Sexta' },
+  { chave: 'sabado', nome: 'Sábado' },
+  { chave: 'domingo', nome: 'Domingo' },
 ]
-
-const DIAS_SEMANA_NOMES = ['Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado', 'Domingo']
 
 export default function AgendaPage() {
   const { preferencias } = useAuth()
@@ -133,6 +135,67 @@ export default function AgendaPage() {
   }, [carregar])
 
   useRealtime('consultas', () => carregar())
+
+  // Obter chave do dia da semana a partir de uma data (0 = domingo, 1 = segunda, etc.)
+  const obterChaveDiaSemana = useCallback((d: Date): DiaSemanaChave => {
+    const day = d.getDay() // 0 = dom, 1 = seg, 2 = ter, 3 = qua, 4 = qui, 5 = sex, 6 = sab
+    switch (day) {
+      case 1:
+        return 'segunda'
+      case 2:
+        return 'terca'
+      case 3:
+        return 'quarta'
+      case 4:
+        return 'quinta'
+      case 5:
+        return 'sexta'
+      case 6:
+        return 'sabado'
+      case 0:
+      default:
+        return 'domingo'
+    }
+  }, [])
+
+  // Mapa de horários configurados no sistema ou default
+  const horariosConfigurados: HorariosAtendimentoSemana = useMemo(() => {
+    if (
+      preferencias?.horarios_atendimento &&
+      Object.keys(preferencias.horarios_atendimento).length > 0
+    ) {
+      return preferencias.horarios_atendimento
+    }
+    return HORARIOS_PADRAO_CONSULTORIO
+  }, [preferencias?.horarios_atendimento])
+
+  // Configuração para o dia atualmente selecionado na visualização 'dia'
+  const chaveDiaAtual = useMemo(
+    () => obterChaveDiaSemana(dataSelecionada),
+    [dataSelecionada, obterChaveDiaSemana],
+  )
+  const configDiaAtual = useMemo(() => {
+    return horariosConfigurados[chaveDiaAtual] || { ativo: false, horarios: [] }
+  }, [horariosConfigurados, chaveDiaAtual])
+
+  // Lista de horários a serem renderizados no dia selecionado.
+  // Se houver consultas agendadas em horários que não constam mais na grade (ex: antigas ou extraordinárias),
+  // incluí-los também para que a psicóloga não perca a visualização dessas consultas existentes!
+  const horariosDoDiaVisualizacao = useMemo(() => {
+    const dataAtualStr = dataSelecionada.toISOString().split('T')[0]
+    const consultasNesteDia = consultas.filter((c) => c.data.startsWith(dataAtualStr))
+
+    const setHorarios = new Set<string>(configDiaAtual.ativo ? configDiaAtual.horarios : [])
+    consultasNesteDia.forEach((c) => {
+      if (c.hora_inicio) setHorarios.add(c.hora_inicio)
+    })
+
+    return Array.from(setHorarios).sort((a, b) => {
+      const [hA, mA] = a.split(':').map(Number)
+      const [hB, mB] = b.split(':').map(Number)
+      return hA * 60 + mA - (hB * 60 + mB)
+    })
+  }, [dataSelecionada, configDiaAtual, consultas])
 
   // Navegação de datas
   const irParaHoje = () => {
@@ -259,16 +322,21 @@ export default function AgendaPage() {
     for (let i = 0; i < 7; i++) {
       const current = new Date(monday)
       current.setDate(monday.getDate() + i)
+      const chave = DIAS_SEMANA_MAP[i].chave
+      const config = horariosConfigurados[chave] || { ativo: false, horarios: [] }
+
       dias.push({
         data: current,
         dataStr: current.toISOString().split('T')[0],
-        diaSemanaNome: DIAS_SEMANA_NOMES[i],
+        diaSemanaNome: DIAS_SEMANA_MAP[i].nome,
+        chave,
+        config,
         numeroDia: current.getDate(),
         ehHoje: current.toDateString() === new Date().toDateString(),
       })
     }
     return dias
-  }, [dataSelecionada])
+  }, [dataSelecionada, horariosConfigurados])
 
   const formatarCabecalhoPeriodo = () => {
     const mesAno = dataSelecionada.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
@@ -359,111 +427,168 @@ export default function AgendaPage() {
 
       {/* Visualização de Dia */}
       {visualizacao === 'dia' && (
-        <div className="bg-white rounded-2xl border border-[#B9BDB8]/30 shadow-xs p-4 sm:p-6 divide-y divide-[#B9BDB8]/20">
-          {HORARIOS_DIA.map((hora) => {
-            const dataAtualStr = dataSelecionada.toISOString().split('T')[0]
-            const consultasNesteHorario = consultas.filter(
-              (c) => c.data.startsWith(dataAtualStr) && c.hora_inicio === hora,
-            )
-
-            return (
-              <div
-                key={hora}
-                className="py-3 flex flex-col sm:flex-row sm:items-center gap-3 group hover:bg-[#F7F8F6]/40 px-3 rounded-xl transition-colors"
-              >
-                {/* Rótulo de Hora */}
-                <div className="w-16 shrink-0 flex items-center gap-1.5 text-xs font-bold text-[#8A9A83]">
-                  <Clock className="w-3.5 h-3.5" />
-                  <span>{hora}</span>
-                </div>
-
-                {/* Conteúdo do Horário */}
-                <div className="flex-1">
-                  {consultasNesteHorario.length === 0 ? (
-                    <button
-                      type="button"
-                      onClick={() => abrirModalNovo(hora, dataAtualStr)}
-                      className="w-full py-2 px-3 border border-dashed border-[#B9BDB8]/40 hover:border-[#8A9A83] rounded-xl text-left text-xs text-gray-400 hover:text-[#8A9A83] flex items-center justify-between transition-colors opacity-70 hover:opacity-100"
-                    >
-                      <span>Horário disponível para agendamento</span>
-                      <Plus className="w-4 h-4" />
-                    </button>
-                  ) : (
-                    <div className="space-y-2">
-                      {consultasNesteHorario.map((c) => {
-                        const pacienteNome =
-                          c.expand?.paciente_id?.nome || 'Paciente não identificado'
-                        return (
-                          <div
-                            key={c.id}
-                            className="bg-[#E4EADF]/60 border-l-4 border-[#3A4A3A] p-3.5 rounded-r-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:shadow-xs transition-shadow cursor-pointer"
-                            onClick={() => abrirModalEditar(c)}
-                          >
-                            <div>
-                              <div className="flex items-center gap-2">
-                                <span className="font-bold text-sm text-[#2C3A2C]">
-                                  {pacienteNome}
-                                </span>
-                                <span className="text-xs text-[#8A9A83] font-medium">
-                                  ({c.duracao_minutos} min)
-                                </span>
-                              </div>
-                              {c.observacoes && (
-                                <p className="text-xs text-[#4A4A48] mt-1 line-clamp-1">
-                                  {c.observacoes}
-                                </p>
-                              )}
-                            </div>
-
-                            <div className="flex items-center gap-2 shrink-0">
-                              <span
-                                className={`text-[11px] font-semibold px-2.5 py-0.5 rounded-full flex items-center gap-1 ${
-                                  c.modalidade === 'Online'
-                                    ? 'bg-blue-50 text-blue-700'
-                                    : 'bg-white text-[#2C3A2C]'
-                                }`}
-                              >
-                                {c.modalidade === 'Online' ? (
-                                  <Video className="w-3 h-3" />
-                                ) : (
-                                  <MapPin className="w-3 h-3" />
-                                )}
-                                {c.modalidade}
-                              </span>
-
-                              <span
-                                className={`text-[11px] font-semibold px-2.5 py-0.5 rounded-full ${
-                                  c.status === 'Confirmada'
-                                    ? 'bg-[#DFF0EB] text-[#2E7D6B]'
-                                    : c.status === 'Realizada'
-                                      ? 'bg-gray-200 text-gray-700'
-                                      : 'bg-[#FBF0D6] text-[#E5A93D]'
-                                }`}
-                              >
-                                {c.status}
-                              </span>
-
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  setConsultaExcluir(c)
-                                }}
-                                className="p-1.5 text-gray-400 hover:text-[#C45545] rounded-lg hover:bg-white transition-colors ml-1"
-                                title="Cancelar consulta"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </div>
+        <div className="bg-white rounded-2xl border border-[#B9BDB8]/30 shadow-xs p-4 sm:p-6">
+          {!configDiaAtual.ativo && horariosDoDiaVisualizacao.length === 0 ? (
+            <div className="p-12 text-center space-y-3">
+              <div className="w-12 h-12 rounded-2xl bg-[#E4EADF] text-[#8A9A83] flex items-center justify-center mx-auto text-xl">
+                ☕
               </div>
-            )
-          })}
+              <h3 className="text-base font-bold text-[#2C3A2C]">
+                Sem atendimento configurado neste dia
+              </h3>
+              <p className="text-xs text-[#8A9A83] max-w-sm mx-auto">
+                Este dia da semana está marcado como sem atendimento nas suas configurações de
+                horários livres.
+              </p>
+              <div className="flex items-center justify-center gap-3 pt-2">
+                <Button
+                  onClick={() =>
+                    abrirModalNovo('09:00', dataSelecionada.toISOString().split('T')[0])
+                  }
+                  variant="outline"
+                  size="sm"
+                  className="rounded-xl border-[#B9BDB8]/50 text-xs"
+                >
+                  <Plus className="w-3.5 h-3.5 mr-1" />
+                  Agendar consulta extraordinária
+                </Button>
+                <Link to="/configuracoes">
+                  <Button
+                    size="sm"
+                    className="bg-[#8A9A83] hover:bg-[#75846F] text-white rounded-xl text-xs"
+                  >
+                    Editar horários do dia
+                  </Button>
+                </Link>
+              </div>
+            </div>
+          ) : horariosDoDiaVisualizacao.length === 0 ? (
+            <div className="p-12 text-center space-y-3">
+              <Clock className="w-10 h-10 text-[#8A9A83]/50 mx-auto" />
+              <h3 className="text-base font-bold text-[#2C3A2C]">
+                Nenhum horário livre cadastrado para este dia
+              </h3>
+              <p className="text-xs text-[#8A9A83] max-w-sm mx-auto">
+                O dia está ativo, mas não possui horários cadastrados. Defina seus horários livres
+                nas Configurações do sistema.
+              </p>
+              <Link to="/configuracoes" className="inline-block mt-2">
+                <Button
+                  size="sm"
+                  className="bg-[#8A9A83] hover:bg-[#75846F] text-white rounded-xl text-xs"
+                >
+                  Configurar horários agora
+                </Button>
+              </Link>
+            </div>
+          ) : (
+            <div className="divide-y divide-[#B9BDB8]/20">
+              {horariosDoDiaVisualizacao.map((hora) => {
+                const dataAtualStr = dataSelecionada.toISOString().split('T')[0]
+                const consultasNesteHorario = consultas.filter(
+                  (c) => c.data.startsWith(dataAtualStr) && c.hora_inicio === hora,
+                )
+
+                return (
+                  <div
+                    key={hora}
+                    className="py-3 flex flex-col sm:flex-row sm:items-center gap-3 group hover:bg-[#F7F8F6]/40 px-3 rounded-xl transition-colors"
+                  >
+                    {/* Rótulo de Hora */}
+                    <div className="w-16 shrink-0 flex items-center gap-1.5 text-xs font-bold text-[#8A9A83]">
+                      <Clock className="w-3.5 h-3.5" />
+                      <span>{hora}</span>
+                    </div>
+
+                    {/* Conteúdo do Horário */}
+                    <div className="flex-1">
+                      {consultasNesteHorario.length === 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => abrirModalNovo(hora, dataAtualStr)}
+                          className="w-full py-2 px-3 border border-dashed border-[#B9BDB8]/40 hover:border-[#8A9A83] rounded-xl text-left text-xs text-gray-400 hover:text-[#8A9A83] flex items-center justify-between transition-colors opacity-70 hover:opacity-100"
+                        >
+                          <span>Horário disponível para agendamento ({hora})</span>
+                          <Plus className="w-4 h-4" />
+                        </button>
+                      ) : (
+                        <div className="space-y-2">
+                          {consultasNesteHorario.map((c) => {
+                            const pacienteNome =
+                              c.expand?.paciente_id?.nome || 'Paciente não identificado'
+                            return (
+                              <div
+                                key={c.id}
+                                className="bg-[#E4EADF]/60 border-l-4 border-[#3A4A3A] p-3.5 rounded-r-xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 hover:shadow-xs transition-shadow cursor-pointer"
+                                onClick={() => abrirModalEditar(c)}
+                              >
+                                <div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-bold text-sm text-[#2C3A2C]">
+                                      {pacienteNome}
+                                    </span>
+                                    <span className="text-xs text-[#8A9A83] font-medium">
+                                      ({c.duracao_minutos} min)
+                                    </span>
+                                  </div>
+                                  {c.observacoes && (
+                                    <p className="text-xs text-[#4A4A48] mt-1 line-clamp-1">
+                                      {c.observacoes}
+                                    </p>
+                                  )}
+                                </div>
+
+                                <div className="flex items-center gap-2 shrink-0">
+                                  <span
+                                    className={`text-[11px] font-semibold px-2.5 py-0.5 rounded-full flex items-center gap-1 ${
+                                      c.modalidade === 'Online'
+                                        ? 'bg-blue-50 text-blue-700'
+                                        : 'bg-white text-[#2C3A2C]'
+                                    }`}
+                                  >
+                                    {c.modalidade === 'Online' ? (
+                                      <Video className="w-3 h-3" />
+                                    ) : (
+                                      <MapPin className="w-3 h-3" />
+                                    )}
+                                    {c.modalidade}
+                                  </span>
+
+                                  <span
+                                    className={`text-[11px] font-semibold px-2.5 py-0.5 rounded-full ${
+                                      c.status === 'Confirmada'
+                                        ? 'bg-[#DFF0EB] text-[#2E7D6B]'
+                                        : c.status === 'Realizada'
+                                          ? 'bg-gray-200 text-gray-700'
+                                          : 'bg-[#FBF0D6] text-[#E5A93D]'
+                                    }`}
+                                  >
+                                    {c.status}
+                                  </span>
+
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      setConsultaExcluir(c)
+                                    }}
+                                    className="p-1.5 text-gray-400 hover:text-[#C45545] rounded-lg hover:bg-white transition-colors ml-1"
+                                    title="Cancelar consulta"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
         </div>
       )}
 
@@ -493,15 +618,25 @@ export default function AgendaPage() {
           <div className="grid grid-cols-1 md:grid-cols-7 divide-y md:divide-y-0 md:divide-x divide-[#B9BDB8]/20 min-h-[450px]">
             {diasDaSemana.map((dia) => {
               const consultasDoDia = consultas.filter((c) => c.data.startsWith(dia.dataStr))
+              const estaAtivo = dia.config.ativo
+              const primeiroHorario = dia.config.horarios[0] || '10:00'
 
               return (
                 <div
                   key={dia.dataStr}
                   className={`p-2.5 flex flex-col justify-between ${
-                    dia.ehHoje ? 'bg-[#E4EADF]/10' : ''
+                    dia.ehHoje ? 'bg-[#E4EADF]/15' : !estaAtivo ? 'bg-gray-50/50' : ''
                   }`}
                 >
                   <div className="space-y-2">
+                    {!estaAtivo && consultasDoDia.length === 0 && (
+                      <div className="p-3 text-center my-auto">
+                        <span className="text-[11px] text-gray-400 italic block">
+                          Sem atendimento
+                        </span>
+                      </div>
+                    )}
+
                     {consultasDoDia.map((c) => {
                       const pacienteNome =
                         c.expand?.paciente_id?.nome || 'Paciente não identificado'
@@ -541,11 +676,11 @@ export default function AgendaPage() {
 
                   <button
                     type="button"
-                    onClick={() => abrirModalNovo('10:00', dia.dataStr)}
+                    onClick={() => abrirModalNovo(primeiroHorario, dia.dataStr)}
                     className="mt-3 w-full py-1.5 border border-dashed border-[#B9BDB8]/50 hover:border-[#8A9A83] rounded-lg text-[11px] text-gray-400 hover:text-[#8A9A83] flex items-center justify-center gap-1 transition-colors"
                   >
                     <Plus className="w-3 h-3" />
-                    <span>Agendar</span>
+                    <span>{estaAtivo ? 'Agendar' : 'Agendar extra'}</span>
                   </button>
                 </div>
               )
@@ -605,19 +740,18 @@ export default function AgendaPage() {
                 <Label htmlFor="hora" className="text-xs font-semibold text-[#2C3A2C]">
                   Horário de início *
                 </Label>
-                <select
+                <Input
                   id="hora"
+                  type="time"
+                  step="300"
                   value={horaInicio}
                   onChange={(e) => setHoraInicio(e.target.value)}
-                  className="mt-1 w-full px-3 py-2 bg-white border border-[#B9BDB8]/50 rounded-xl text-sm font-medium text-[#2C3A2C] focus:outline-hidden focus:ring-2 focus:ring-[#8A9A83]"
+                  className="mt-1 rounded-xl border-[#B9BDB8]/50 text-sm font-semibold"
                   required
-                >
-                  {HORARIOS_DIA.map((h) => (
-                    <option key={h} value={h}>
-                      {h}
-                    </option>
-                  ))}
-                </select>
+                />
+                <p className="text-[10px] text-[#8A9A83] mt-1">
+                  Permite qualquer horário (ex.: 08:30, 09:15, 14:45).
+                </p>
               </div>
             </div>
 

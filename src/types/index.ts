@@ -2,7 +2,24 @@ export type ModalidadeConsulta = 'Presencial' | 'Online' | 'Mista'
 export type StatusConsulta = 'Agendada' | 'Confirmada' | 'Realizada' | 'Faltou' | 'Cancelada'
 export type StatusPagamento = 'Pago' | 'Pendente' | 'Cancelado'
 export type FormaPagamento = 'Pix' | 'Cartão' | 'Dinheiro' | 'Transferência' | 'Outro'
+export type TipoPagamento = 'Consulta' | 'Mensal'
 export type TagProntuario = 'Avaliação inicial' | 'Revisão' | 'Alta' | 'Crise' | 'Outro'
+
+export type DiaSemanaChave =
+  | 'segunda'
+  | 'terca'
+  | 'quarta'
+  | 'quinta'
+  | 'sexta'
+  | 'sabado'
+  | 'domingo'
+
+export interface ConfiguracaoDiaHorario {
+  ativo: boolean
+  horarios: string[] // ex: ['08:00', '08:30', '09:00', ...]
+}
+
+export type HorariosAtendimentoSemana = Record<DiaSemanaChave, ConfiguracaoDiaHorario>
 
 export interface Usuario {
   id: string
@@ -20,6 +37,7 @@ export interface PreferenciasUsuario {
   monograma: string
   modalidade_padrao: ModalidadeConsulta
   valor_padrao_sessao: number
+  horarios_atendimento?: HorariosAtendimentoSemana
   created: string
   updated: string
 }
@@ -58,7 +76,11 @@ export interface Consulta {
 
 export interface Pagamento {
   id: string
-  consulta_id: string
+  consulta_id?: string
+  paciente_id?: string
+  tipo_pagamento?: TipoPagamento
+  mes_referencia?: string // "YYYY-MM"
+  descricao?: string
   valor: number
   status: StatusPagamento
   forma_pagamento: FormaPagamento
@@ -67,6 +89,7 @@ export interface Pagamento {
   updated: string
   expand?: {
     consulta_id?: Consulta
+    paciente_id?: Paciente
   }
 }
 

@@ -9,6 +9,11 @@ import {
   PieChart as PieIcon,
   BarChart3,
   Edit2,
+  Plus,
+  Receipt,
+  FileText,
+  User,
+  Trash2,
 } from 'lucide-react'
 import {
   BarChart,
@@ -34,16 +39,32 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog'
 import { toast } from 'sonner'
-import { listarPagamentos, marcarComoPago, atualizarPagamento } from '@/services/pagamentos'
+import {
+  listarPagamentos,
+  marcarComoPago,
+  atualizarPagamento,
+  criarPagamento,
+} from '@/services/pagamentos'
 import { listarConsultas } from '@/services/consultas'
+import { listarPacientes } from '@/services/pacientes'
+import pb from '@/lib/pocketbase/client'
 import { formatarMoeda, formatarDataAbreviada } from '@/lib/formatters'
 import { useRealtime } from '@/hooks/use-realtime'
-import type { Pagamento, FormaPagamento, StatusPagamento } from '@/types'
+import type {
+  Pagamento,
+  FormaPagamento,
+  StatusPagamento,
+  TipoPagamento,
+  Paciente,
+  Consulta,
+} from '@/types'
 
 const CORES_PIE = ['#8A9A83', '#C8845F', '#2E7D6B', '#E5A93D', '#75846F']
 
 export default function FinanceiroPage() {
   const [pagamentos, setPagamentos] = useState<Pagamento[]>([])
+  const [pacientes, setPacientes] = useState<Paciente[]>([])
+  const [consultasDoMes, setConsultasDoMes] = useState<Consulta[]>([])
   const [carregando, setCarregando] = useState(true)
 
   // Filtros
@@ -51,6 +72,19 @@ export default function FinanceiroPage() {
   const mesAtualStr = `${hoje.getFullYear()}-${String(hoje.getMonth() + 1).padStart(2, '0')}`
   const [mesSelecionado, setMesSelecionado] = useState(mesAtualStr)
   const [filtroStatus, setFiltroStatus] = useState<string>('todos')
+  const [filtroTipo, setFiltroTipo] = useState<string>('todos')
+
+  // Modal de Novo Pagamento (Avulso / Mensalidade)
+  const [modalNovoAberto, setModalNovoAberto] = useState(false)
+  const [novoTipo, setNovoTipo] = useState<TipoPagamento>('Mensal')
+  const [novoPacienteId, setNovoPacienteId] = useState('')
+  const [novaConsultaId, setNovaConsultaId] = useState('')
+  const [novoMesReferencia, setNovoMesReferencia] = useState(mesSelecionado)
+  const [novoValor, setNovoValor] = useState<number>(800)
+  const [novoStatus, setNovoStatus] = useState<StatusPagamento>('Pendente')
+  const [novaForma, setNovaForma] = useState<FormaPagamento>('Pix')
+  const [novaDescricao, setNovaDescricao] = useState('')
+  const [salvandoNovo, setSalvandoNovo] = useState(false)
 
   // Modal de Edição de Pagamento
   const [modalEditarAberto, setModalEditarAberto] = useState(false)
@@ -58,6 +92,8 @@ export default function FinanceiroPage() {
   const [valorEditado, setValorEditado] = useState<number>(0)
   const [statusEditado, setStatusEditado] = useState<StatusPagamento>('Pendente')
   const [formaEditada, setFormaEditada] = useState<FormaPagamento>('Pix')
+  const [descricaoEditada, setDescricaoEditada] = useState('')
+  const [mesRefEditado, setMesRefEditado] = useState('')
   const [salvando, setSalvando] = useState(false)
 
   // Consultas do mês para gráfico de modalidade e total de atendimentos
@@ -69,10 +105,15 @@ export default function FinanceiroPage() {
   const carregarDados = useCallback(async () => {
     try {
       setCarregando(true)
-      const lista = await listarPagamentos({
-        mesAno: mesSelecionado,
-        status: filtroStatus,
-      })
+
+      const [pacs, lista] = await Promise.all([
+        listarPacientes(),
+        listarPagamentos({
+          mesAno: mesSelecionado,
+          status: filtroStatus,
+        }),
+      ])
+      setPacientes(pacs)
       setPagamentos(lista)
 
       // Buscar consultas do mês para total de atendimentos e modalidade
@@ -86,6 +127,7 @@ export default function FinanceiroPage() {
         dataInicio: primeiroDia,
         dataFim: ultimoDia,
       })
+      setConsultasDoMes(consultasMes)
 
       const realizadas = consultasMes.filter((c) => c.status === 'Realizada')
       setTotalAtendimentosMes(realizadas.length)
@@ -96,7 +138,6 @@ export default function FinanceiroPage() {
         if (c.modalidade === 'Presencial') presenciais++
         else if (c.modalidade === 'Online') online++
         else {
-          // Mista divide ou conta ambos
           presenciais++
         }
       }
@@ -130,11 +171,81 @@ export default function FinanceiroPage() {
     }
   }
 
+  const abrirModalNovo = () => {
+    setNovoTipo('Mensal')
+    setNovoPacienteId(pacientes.length > 0 ? pacientes[0].id : '')
+    setNovaConsultaId(consultasDoMes.length > 0 ? consultasDoMes[0].id : '')
+    setNovoMesReferencia(mesSelecionado)
+    setNovoValor(800)
+    setNovoStatus('Pendente')
+    setNovaForma('Pix')
+    const [ano, mes] = mesSelecionado.split('-')
+    const nomeMes = new Date(Number(ano), Number(mes) - 1).toLocaleDateString('pt-BR', {
+      month: 'long',
+    })
+    setNovaDescricao(`Mensalidade de ${nomeMes}/${ano}`)
+    setModalNovoAberto(true)
+  }
+
+  const salvarNovoPagamento = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (novoTipo === 'Mensal' && !novoPacienteId) {
+      toast.error('Selecione um paciente para registrar o pagamento mensal.')
+      return
+    }
+    if (novoTipo === 'Consulta' && !novaConsultaId) {
+      toast.error('Selecione uma consulta vinculada.')
+      return
+    }
+
+    try {
+      setSalvandoNovo(true)
+      const dataPagamento = novoStatus === 'Pago' ? new Date().toISOString() : undefined
+
+      const payload: Partial<Pagamento> = {
+        tipo_pagamento: novoTipo,
+        valor: novoValor,
+        status: novoStatus,
+        forma_pagamento: novaForma,
+        descricao: novaDescricao.trim(),
+        data_pagamento: dataPagamento,
+      }
+
+      if (novoTipo === 'Mensal') {
+        payload.paciente_id = novoPacienteId
+        payload.mes_referencia = novoMesReferencia
+        payload.consulta_id = undefined
+      } else {
+        payload.consulta_id = novaConsultaId
+        // Encontrar paciente da consulta para referência
+        const c = consultasDoMes.find((item) => item.id === novaConsultaId)
+        if (c?.paciente_id) {
+          payload.paciente_id = c.paciente_id
+        }
+      }
+
+      await criarPagamento(payload)
+      toast.success(
+        novoTipo === 'Mensal'
+          ? 'Pagamento mensal registrado com sucesso!'
+          : 'Pagamento por consulta registrado com sucesso!',
+      )
+      setModalNovoAberto(false)
+      carregarDados()
+    } catch {
+      toast.error('Erro ao registrar novo pagamento.')
+    } finally {
+      setSalvandoNovo(false)
+    }
+  }
+
   const abrirModalEditar = (p: Pagamento) => {
     setPagamentoEditando(p)
     setValorEditado(p.valor || 0)
     setStatusEditado(p.status || 'Pendente')
     setFormaEditada(p.forma_pagamento || 'Pix')
+    setDescricaoEditada(p.descricao || '')
+    setMesRefEditado(p.mes_referencia || mesSelecionado)
     setModalEditarAberto(true)
   }
 
@@ -143,12 +254,24 @@ export default function FinanceiroPage() {
     if (!pagamentoEditando) return
     try {
       setSalvando(true)
-      await atualizarPagamento(pagamentoEditando.id, {
+      const payload: Partial<Pagamento> = {
         valor: valorEditado,
         status: statusEditado,
         forma_pagamento: formaEditada,
-        data_pagamento: statusEditado === 'Pago' ? new Date().toISOString() : undefined,
-      })
+        descricao: descricaoEditada.trim(),
+      }
+
+      if (pagamentoEditando.tipo_pagamento === 'Mensal') {
+        payload.mes_referencia = mesRefEditado
+      }
+
+      if (statusEditado === 'Pago') {
+        payload.data_pagamento = pagamentoEditando.data_pagamento || new Date().toISOString()
+      } else {
+        payload.data_pagamento = undefined
+      }
+
+      await atualizarPagamento(pagamentoEditando.id, payload)
       toast.success('Pagamento atualizado com sucesso!')
       setModalEditarAberto(false)
       carregarDados()
@@ -159,11 +282,39 @@ export default function FinanceiroPage() {
     }
   }
 
+  const excluirPagamento = async (id: string) => {
+    if (!confirm('Deseja realmente excluir este registro de pagamento?')) return
+    try {
+      await pb.collection('pagamentos').delete(id)
+      toast.success('Pagamento excluído com sucesso.')
+      carregarDados()
+    } catch {
+      toast.error('Erro ao excluir pagamento.')
+    }
+  }
+
+  // Filtragem de Pagamentos na tabela
+  const pagamentosFiltrados = useMemo(() => {
+    if (filtroTipo === 'todos') return pagamentos
+    return pagamentos.filter((p) => {
+      const tipo = p.tipo_pagamento || 'Consulta'
+      return tipo === filtroTipo
+    })
+  }, [pagamentos, filtroTipo])
+
   // Agregações de Cards
-  const { totalRecebido, totalReceber, faturamentoBruto } = useMemo(() => {
+  const {
+    totalRecebido,
+    totalReceber,
+    faturamentoBruto,
+    totalMensalidades,
+    totalConsultasAvulsas,
+  } = useMemo(() => {
     let recebido = 0
     let aReceber = 0
     let bruto = 0
+    let mensalidades = 0
+    let porConsulta = 0
 
     for (const p of pagamentos) {
       const v = p.valor || 0
@@ -173,16 +324,24 @@ export default function FinanceiroPage() {
       } else if (p.status === 'Pendente') {
         aReceber += v
       }
+
+      if (p.tipo_pagamento === 'Mensal') {
+        mensalidades += v
+      } else {
+        porConsulta += v
+      }
     }
 
     return {
       totalRecebido: recebido,
       totalReceber: aReceber,
       faturamentoBruto: bruto,
+      totalMensalidades: mensalidades,
+      totalConsultasAvulsas: porConsulta,
     }
   }, [pagamentos])
 
-  // Gráfico por Dia do Mês
+  // Gráfico por Dia do Mês: registra o faturamento no dia em que foi recebido/pago
   const dadosGraficoDias = useMemo(() => {
     const mapaDias: Record<number, number> = {}
     for (let d = 1; d <= 31; d++) mapaDias[d] = 0
@@ -231,36 +390,61 @@ export default function FinanceiroPage() {
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
-      {/* Barra de Filtro de Mês e Status */}
-      <div className="bg-white rounded-2xl border border-[#B9BDB8]/30 p-4 sm:p-5 shadow-xs flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-[#2C3A2C]">
-            <Calendar className="w-4 h-4 text-[#8A9A83]" />
-            <span>Mês de Referência:</span>
+      {/* Barra de Filtro de Mês, Status e Botão Novo Pagamento */}
+      <div className="bg-white rounded-2xl border border-[#B9BDB8]/30 p-4 sm:p-5 shadow-xs flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
+        <div className="flex flex-wrap items-center gap-3 sm:gap-4">
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-[#2C3A2C]">
+              <Calendar className="w-4 h-4 text-[#8A9A83]" />
+              <span>Mês:</span>
+            </div>
+            <Input
+              type="month"
+              value={mesSelecionado}
+              onChange={(e) => setMesSelecionado(e.target.value)}
+              className="w-38 rounded-xl border-[#B9BDB8]/50 text-xs font-semibold text-[#2C3A2C]"
+            />
           </div>
-          <Input
-            type="month"
-            value={mesSelecionado}
-            onChange={(e) => setMesSelecionado(e.target.value)}
-            className="w-44 rounded-xl border-[#B9BDB8]/50 text-xs font-semibold text-[#2C3A2C]"
-          />
+
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-[#2C3A2C]">
+              <Filter className="w-4 h-4 text-[#8A9A83]" />
+              <span>Status:</span>
+            </div>
+            <select
+              value={filtroStatus}
+              onChange={(e) => setFiltroStatus(e.target.value)}
+              className="px-3 py-1.5 bg-[#F7F8F6] border border-[#B9BDB8]/40 rounded-xl text-xs font-medium text-[#2C3A2C] focus:outline-hidden focus:ring-2 focus:ring-[#8A9A83]"
+            >
+              <option value="todos">Todos</option>
+              <option value="Pago">Pago</option>
+              <option value="Pendente">Pendente</option>
+              <option value="Cancelado">Cancelado</option>
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-semibold text-[#2C3A2C]">Tipo:</span>
+            <select
+              value={filtroTipo}
+              onChange={(e) => setFiltroTipo(e.target.value)}
+              className="px-3 py-1.5 bg-[#F7F8F6] border border-[#B9BDB8]/40 rounded-xl text-xs font-medium text-[#2C3A2C] focus:outline-hidden focus:ring-2 focus:ring-[#8A9A83]"
+            >
+              <option value="todos">Todos os tipos</option>
+              <option value="Consulta">Por consulta</option>
+              <option value="Mensal">Mensalidades</option>
+            </select>
+          </div>
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 text-xs font-semibold text-[#2C3A2C]">
-            <Filter className="w-4 h-4 text-[#8A9A83]" />
-            <span>Status:</span>
-          </div>
-          <select
-            value={filtroStatus}
-            onChange={(e) => setFiltroStatus(e.target.value)}
-            className="px-3 py-1.5 bg-[#F7F8F6] border border-[#B9BDB8]/40 rounded-xl text-xs font-medium text-[#2C3A2C] focus:outline-hidden focus:ring-2 focus:ring-[#8A9A83]"
+        <div className="flex items-center justify-end">
+          <Button
+            onClick={abrirModalNovo}
+            className="bg-[#8A9A83] hover:bg-[#75846F] text-white rounded-xl gap-2 shadow-xs text-xs sm:text-sm shrink-0"
           >
-            <option value="todos">Todos os status</option>
-            <option value="Pago">Pago</option>
-            <option value="Pendente">Pendente</option>
-            <option value="Cancelado">Cancelado</option>
-          </select>
+            <Plus className="w-4 h-4" />
+            <span>Novo Pagamento / Mensalidade</span>
+          </Button>
         </div>
       </div>
 
@@ -311,10 +495,15 @@ export default function FinanceiroPage() {
               {formatarMoeda(faturamentoBruto)}
             </span>
           </div>
-          <p className="text-xs text-[#8A9A83] mt-2">Soma total de consultas do mês</p>
+          <div className="flex items-center gap-2 text-[11px] text-[#8A9A83] mt-2">
+            <span className="text-[#3A4A3A] font-semibold">
+              Mensal: {formatarMoeda(totalMensalidades)}
+            </span>
+            <span>•</span>
+            <span>Consultas: {formatarMoeda(totalConsultasAvulsas)}</span>
+          </div>
         </div>
       </div>
-
       {/* Relatório Mensal com Gráficos */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Gráfico de Barras: Faturamento por Dia */}
@@ -430,29 +619,42 @@ export default function FinanceiroPage() {
           <div>
             <h3 className="text-base font-bold text-[#2C3A2C]">Lista de Pagamentos do Mês</h3>
             <p className="text-xs text-[#8A9A83]">
-              Controle detalhado de cada sessão e recebimento
+              Controle detalhado de cada consulta avulsa e mensalidade do consultório
             </p>
           </div>
+          <span className="text-xs font-semibold px-3 py-1 rounded-full bg-[#F7F8F6] border border-[#B9BDB8]/30 text-[#4A4A48]">
+            {pagamentosFiltrados.length}{' '}
+            {pagamentosFiltrados.length === 1 ? 'registro' : 'registros'}
+          </span>
         </div>
 
         {carregando ? (
           <div className="p-12 text-center text-sm text-[#8A9A83]">Carregando pagamentos...</div>
-        ) : pagamentos.length === 0 ? (
-          <div className="p-12 text-center space-y-2">
+        ) : pagamentosFiltrados.length === 0 ? (
+          <div className="p-12 text-center space-y-3">
+            <Receipt className="w-10 h-10 text-[#8A9A83]/50 mx-auto" />
             <p className="text-sm font-semibold text-[#2C3A2C]">
-              Nenhum pagamento registrado no período.
+              Nenhum pagamento encontrado com os filtros selecionados.
             </p>
-            <p className="text-xs text-[#8A9A83]">
-              Os pagamentos são criados automaticamente ao agendar consultas na Agenda.
+            <p className="text-xs text-[#8A9A83] max-w-sm mx-auto">
+              Você pode registrar um novo pagamento mensal ou vinculado a consulta pelo botão acima.
             </p>
+            <Button
+              onClick={abrirModalNovo}
+              className="bg-[#8A9A83] hover:bg-[#75846F] text-white rounded-xl text-xs gap-1.5"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Cadastrar pagamento</span>
+            </Button>
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm text-[#4A4A48]">
               <thead className="bg-[#F7F8F6] text-[#2C3A2C] text-xs font-semibold uppercase tracking-wider border-b border-[#B9BDB8]/30">
                 <tr>
-                  <th className="py-4 px-6">Paciente</th>
-                  <th className="py-4 px-4">Data Consulta</th>
+                  <th className="py-4 px-6">Tipo</th>
+                  <th className="py-4 px-4">Paciente / Descrição</th>
+                  <th className="py-4 px-4">Referência</th>
                   <th className="py-4 px-4">Valor</th>
                   <th className="py-4 px-4">Forma</th>
                   <th className="py-4 px-4">Status</th>
@@ -460,25 +662,60 @@ export default function FinanceiroPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#B9BDB8]/20">
-                {pagamentos.map((p) => {
+                {pagamentosFiltrados.map((p) => {
                   const consulta = p.expand?.consulta_id
+                  const pacienteDireto = p.expand?.paciente_id
                   const pacienteNome =
-                    consulta?.expand?.paciente_id?.nome || 'Paciente não identificado'
+                    pacienteDireto?.nome ||
+                    consulta?.expand?.paciente_id?.nome ||
+                    'Paciente não identificado'
+                  const ehMensal = p.tipo_pagamento === 'Mensal'
 
                   return (
                     <tr key={p.id} className="hover:bg-[#F7F8F6]/60 transition-colors">
-                      <td className="py-4 px-6 font-semibold text-[#2C3A2C]">{pacienteNome}</td>
-                      <td className="py-4 px-4 text-xs text-[#4A4A48]">
-                        {formatarDataAbreviada(consulta?.data || p.created)}
+                      <td className="py-4 px-6">
+                        {ehMensal ? (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-bold px-2.5 py-1 rounded-full bg-[#F6E8DF] text-[#C8845F] border border-[#C8845F]/30">
+                            <Receipt className="w-3.5 h-3.5" />
+                            <span>Mensal</span>
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full bg-[#E4EADF] text-[#3A4A3A]">
+                            <FileText className="w-3.5 h-3.5" />
+                            <span>Consulta</span>
+                          </span>
+                        )}
                       </td>
+
+                      <td className="py-4 px-4">
+                        <div className="font-semibold text-[#2C3A2C]">{pacienteNome}</div>
+                        {p.descricao && (
+                          <div className="text-xs text-[#8A9A83] mt-0.5 line-clamp-1">
+                            {p.descricao}
+                          </div>
+                        )}
+                      </td>
+
+                      <td className="py-4 px-4 text-xs text-[#4A4A48]">
+                        {ehMensal ? (
+                          <span className="font-medium text-[#2C3A2C]">
+                            Mês {p.mes_referencia || mesSelecionado}
+                          </span>
+                        ) : (
+                          <span>{formatarDataAbreviada(consulta?.data || p.created)}</span>
+                        )}
+                      </td>
+
                       <td className="py-4 px-4 font-bold text-[#2C3A2C]">
                         {formatarMoeda(p.valor)}
                       </td>
+
                       <td className="py-4 px-4">
                         <span className="text-xs px-2.5 py-0.5 rounded-md bg-[#F7F8F6] border border-[#B9BDB8]/40 font-medium">
                           {p.forma_pagamento}
                         </span>
                       </td>
+
                       <td className="py-4 px-4">
                         <span
                           className={`text-xs px-2.5 py-1 rounded-full font-semibold ${
@@ -492,8 +729,9 @@ export default function FinanceiroPage() {
                           {p.status}
                         </span>
                       </td>
+
                       <td className="py-4 px-6 text-right">
-                        <div className="flex items-center justify-end gap-2">
+                        <div className="flex items-center justify-end gap-1.5">
                           {p.status === 'Pendente' && (
                             <Button
                               size="sm"
@@ -513,6 +751,17 @@ export default function FinanceiroPage() {
                           >
                             <Edit2 className="w-3.5 h-3.5" />
                           </Button>
+                          {ehMensal && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => excluirPagamento(p.id)}
+                              className="h-8 w-8 p-0 text-gray-400 hover:text-[#C45545] rounded-lg"
+                              title="Excluir mensalidade"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </Button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -524,6 +773,244 @@ export default function FinanceiroPage() {
         )}
       </div>
 
+      {/* Modal Novo Pagamento (Avulso ou Mensal) */}
+      <Dialog open={modalNovoAberto} onOpenChange={setModalNovoAberto}>
+        <DialogContent className="max-w-lg bg-white rounded-2xl p-6 sm:p-8">
+          <DialogHeader>
+            <DialogTitle className="text-xl font-bold text-[#2C3A2C]">
+              Registrar Pagamento
+            </DialogTitle>
+          </DialogHeader>
+
+          <form onSubmit={salvarNovoPagamento} className="space-y-4 mt-2">
+            {/* Seletor de Tipo: Por Consulta ou Mensal */}
+            <div>
+              <Label className="text-xs font-semibold text-[#2C3A2C] block mb-1.5">
+                Tipo de Cobrança *
+              </Label>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setNovoTipo('Mensal')}
+                  className={`p-3 rounded-xl border text-left transition-all flex items-center justify-between ${
+                    novoTipo === 'Mensal'
+                      ? 'border-[#C8845F] bg-[#F6E8DF]/60 text-[#2C3A2C] font-bold shadow-xs'
+                      : 'border-[#B9BDB8]/40 bg-white text-[#4A4A48] hover:bg-[#F7F8F6]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Receipt className="w-4 h-4 text-[#C8845F]" />
+                    <span className="text-sm">Pagamento Mensal</span>
+                  </div>
+                  {novoTipo === 'Mensal' && <span className="w-2 h-2 rounded-full bg-[#C8845F]" />}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setNovoTipo('Consulta')}
+                  className={`p-3 rounded-xl border text-left transition-all flex items-center justify-between ${
+                    novoTipo === 'Consulta'
+                      ? 'border-[#8A9A83] bg-[#E4EADF]/60 text-[#2C3A2C] font-bold shadow-xs'
+                      : 'border-[#B9BDB8]/40 bg-white text-[#4A4A48] hover:bg-[#F7F8F6]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <FileText className="w-4 h-4 text-[#8A9A83]" />
+                    <span className="text-sm">Por Consulta</span>
+                  </div>
+                  {novoTipo === 'Consulta' && (
+                    <span className="w-2 h-2 rounded-full bg-[#8A9A83]" />
+                  )}
+                </button>
+              </div>
+            </div>
+
+            {/* Campos Específicos de acordo com o Tipo */}
+            {novoTipo === 'Mensal' ? (
+              <>
+                <div>
+                  <Label htmlFor="novoPaciente" className="text-xs font-semibold text-[#2C3A2C]">
+                    Paciente Assinante *
+                  </Label>
+                  <select
+                    id="novoPaciente"
+                    value={novoPacienteId}
+                    onChange={(e) => setNovoPacienteId(e.target.value)}
+                    className="mt-1 w-full px-3 py-2 bg-[#F7F8F6] border border-[#B9BDB8]/50 rounded-xl text-sm font-medium text-[#2C3A2C] focus:outline-hidden focus:ring-2 focus:ring-[#8A9A83]"
+                    required
+                  >
+                    <option value="" disabled>
+                      Selecione o paciente...
+                    </option>
+                    {pacientes.map((pac) => (
+                      <option key={pac.id} value={pac.id}>
+                        {pac.nome}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <Label htmlFor="novoMesRef" className="text-xs font-semibold text-[#2C3A2C]">
+                      Mês de Referência *
+                    </Label>
+                    <Input
+                      id="novoMesRef"
+                      type="month"
+                      value={novoMesReferencia}
+                      onChange={(e) => {
+                        setNovoMesReferencia(e.target.value)
+                        const [ano, mes] = e.target.value.split('-')
+                        if (ano && mes) {
+                          const nomeMes = new Date(Number(ano), Number(mes) - 1).toLocaleDateString(
+                            'pt-BR',
+                            { month: 'long' },
+                          )
+                          setNovaDescricao(`Mensalidade de ${nomeMes}/${ano}`)
+                        }
+                      }}
+                      className="mt-1 rounded-xl border-[#B9BDB8]/50 text-sm font-semibold"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <Label htmlFor="novoValor" className="text-xs font-semibold text-[#2C3A2C]">
+                      Valor Mensal (R$) *
+                    </Label>
+                    <Input
+                      id="novoValor"
+                      type="number"
+                      step="0.01"
+                      value={novoValor}
+                      onChange={(e) => setNovoValor(Number(e.target.value))}
+                      className="mt-1 rounded-xl border-[#B9BDB8]/50 font-bold text-sm"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <Label htmlFor="novaDescricao" className="text-xs font-semibold text-[#2C3A2C]">
+                    Descrição / Identificação
+                  </Label>
+                  <Input
+                    id="novaDescricao"
+                    value={novaDescricao}
+                    onChange={(e) => setNovaDescricao(e.target.value)}
+                    placeholder="Ex.: Mensalidade de março/2026 - Pacote 4 sessões"
+                    className="mt-1 rounded-xl border-[#B9BDB8]/50 text-sm"
+                  />
+                </div>
+              </>
+            ) : (
+              <>
+                <div>
+                  <Label htmlFor="novaConsulta" className="text-xs font-semibold text-[#2C3A2C]">
+                    Consulta Vinculada *
+                  </Label>
+                  <select
+                    id="novaConsulta"
+                    value={novaConsultaId}
+                    onChange={(e) => {
+                      setNovaConsultaId(e.target.value)
+                      const c = consultasDoMes.find((item) => item.id === e.target.value)
+                      if (c?.valor_total) setNovoValor(c.valor_total)
+                    }}
+                    className="mt-1 w-full px-3 py-2 bg-[#F7F8F6] border border-[#B9BDB8]/50 rounded-xl text-sm font-medium text-[#2C3A2C] focus:outline-hidden focus:ring-2 focus:ring-[#8A9A83]"
+                    required
+                  >
+                    <option value="" disabled>
+                      Selecione a consulta...
+                    </option>
+                    {consultasDoMes.map((c) => {
+                      const pac = c.expand?.paciente_id?.nome || 'Paciente'
+                      return (
+                        <option key={c.id} value={c.id}>
+                          {formatarDataAbreviada(c.data)} às {c.hora_inicio} — {pac} (
+                          {formatarMoeda(c.valor_total || 220)})
+                        </option>
+                      )
+                    })}
+                  </select>
+                </div>
+
+                <div>
+                  <Label htmlFor="novoValorCons" className="text-xs font-semibold text-[#2C3A2C]">
+                    Valor da Consulta (R$) *
+                  </Label>
+                  <Input
+                    id="novoValorCons"
+                    type="number"
+                    step="0.01"
+                    value={novoValor}
+                    onChange={(e) => setNovoValor(Number(e.target.value))}
+                    className="mt-1 rounded-xl border-[#B9BDB8]/50 font-bold text-sm"
+                    required
+                  />
+                </div>
+              </>
+            )}
+
+            {/* Forma de Pagamento e Status */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-1">
+              <div>
+                <Label htmlFor="novaForma" className="text-xs font-semibold text-[#2C3A2C]">
+                  Forma de Pagamento
+                </Label>
+                <select
+                  id="novaForma"
+                  value={novaForma}
+                  onChange={(e) => setNovaForma(e.target.value as FormaPagamento)}
+                  className="mt-1 w-full px-3 py-2 bg-white border border-[#B9BDB8]/50 rounded-xl text-sm font-medium text-[#2C3A2C]"
+                >
+                  <option value="Pix">Pix</option>
+                  <option value="Cartão">Cartão</option>
+                  <option value="Transferência">Transferência</option>
+                  <option value="Dinheiro">Dinheiro</option>
+                  <option value="Outro">Outro</option>
+                </select>
+              </div>
+
+              <div>
+                <Label htmlFor="novoStatus" className="text-xs font-semibold text-[#2C3A2C]">
+                  Status do Pagamento
+                </Label>
+                <select
+                  id="novoStatus"
+                  value={novoStatus}
+                  onChange={(e) => setNovoStatus(e.target.value as StatusPagamento)}
+                  className="mt-1 w-full px-3 py-2 bg-white border border-[#B9BDB8]/50 rounded-xl text-sm font-medium text-[#2C3A2C]"
+                >
+                  <option value="Pendente">Pendente (A receber)</option>
+                  <option value="Pago">Pago (Confirmado)</option>
+                  <option value="Cancelado">Cancelado</option>
+                </select>
+              </div>
+            </div>
+
+            <DialogFooter className="gap-2 sm:gap-0 pt-3">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setModalNovoAberto(false)}
+                className="rounded-xl border-[#B9BDB8]/50"
+              >
+                Cancelar
+              </Button>
+              <Button
+                type="submit"
+                disabled={salvandoNovo}
+                className="bg-[#8A9A83] hover:bg-[#75846F] text-white rounded-xl"
+              >
+                {salvandoNovo ? 'Salvando...' : 'Confirmar e Salvar'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
       {/* Modal Editar Pagamento */}
       <Dialog open={modalEditarAberto} onOpenChange={setModalEditarAberto}>
         <DialogContent className="max-w-md bg-white rounded-2xl p-6 sm:p-8">
@@ -534,7 +1021,7 @@ export default function FinanceiroPage() {
           <form onSubmit={salvarEdicaoPagamento} className="space-y-4 mt-2">
             <div>
               <Label htmlFor="valor" className="text-xs font-semibold text-[#2C3A2C]">
-                Valor da Sessão (R$)
+                Valor (R$)
               </Label>
               <Input
                 id="valor"
@@ -542,8 +1029,37 @@ export default function FinanceiroPage() {
                 step="0.01"
                 value={valorEditado}
                 onChange={(e) => setValorEditado(Number(e.target.value))}
-                className="mt-1 rounded-xl border-[#B9BDB8]/50"
+                className="mt-1 rounded-xl border-[#B9BDB8]/50 font-bold"
                 required
+              />
+            </div>
+
+            {pagamentoEditando?.tipo_pagamento === 'Mensal' && (
+              <div>
+                <Label htmlFor="mesRefEdit" className="text-xs font-semibold text-[#2C3A2C]">
+                  Mês de Referência
+                </Label>
+                <Input
+                  id="mesRefEdit"
+                  type="month"
+                  value={mesRefEditado}
+                  onChange={(e) => setMesRefEditado(e.target.value)}
+                  className="mt-1 rounded-xl border-[#B9BDB8]/50"
+                  required
+                />
+              </div>
+            )}
+
+            <div>
+              <Label htmlFor="descEdit" className="text-xs font-semibold text-[#2C3A2C]">
+                Descrição / Observações
+              </Label>
+              <Input
+                id="descEdit"
+                value={descricaoEditada}
+                onChange={(e) => setDescricaoEditada(e.target.value)}
+                placeholder="Ex.: Mensalidade de março/2026"
+                className="mt-1 rounded-xl border-[#B9BDB8]/50 text-sm"
               />
             </div>
 
